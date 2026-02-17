@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rotating Ring Ball Escape Simulation</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.2/p5.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=Outfit:wght@300;600&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #050508;
+      --accent: #6496ff;
+      --glass: rgba(255, 255, 255, 0.03);
+      --glass-border: rgba(255, 255, 255, 0.08);
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: var(--bg-dark);
+      background: radial-gradient(circle at center, #0a0a15 0%, #050508 100%);
+      font-family: 'Inter', sans-serif;
+    }
+
+    #start-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(5, 5, 8, 0.95);
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 100;
+      cursor: pointer;
+      transition: opacity 0.4s ease;
+      padding: 30px;
+      box-sizing: border-box;
+      text-align: center;
+    }
+
+    #start-overlay h1 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 0;
+      letter-spacing: 4px;
+      line-height: 1.5;
+      background: linear-gradient(135deg, #fff 0%, #6496ff 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-transform: uppercase;
+      max-width: 80%;
+      text-shadow: 0 10px 30px rgba(100, 150, 255, 0.2);
+    }
+
+    @media (min-width: 600px) {
+      #start-overlay h1 {
+        font-size: 42px;
+        letter-spacing: 8px;
+        max-width: 800px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="start-overlay" onclick="startSimulation()">
+    <h1>will the ball be able to escape...</h1>
+  </div>
+
+  <script>
+    // ============================================
+    // CONSTANTS AND CONFIGURATION
+    // ============================================
+    const GRAVITY = 980; // pixels per second squared
+    let RING_RADIUS;
+    let RING_THICKNESS;
+    let BALL_RADIUS;
+    const GAP_ANGLE = (Math.PI / 16) * 1.1 * 1.2;
+    const RING_ROTATION_SPEED = 1.2;
+    const VELOCITY_EPSILON = 0.5;
+    const RESTITUTION = 1.1;
+    const FIXED_TIMESTEP = 1 / 120;
+    const FREEZE_DELAY = 1.0;
+
+    // ============================================
+    // GLOBAL STATE
+    // ============================================
+    let ring;
+    let activeBall;
+    let frozenBalls = [];
+    let freezeCount = 0;
+    let usedColors = [];
+    let simulationEnded = false;
+    let simulationStarted = false;
+    let mainAlpha = 0; // for fade-in effect
+    let accumulator = 0; // for fixed timestep integration
+    let audioCtx;
+
+    // ============================================
+    // SOUND MANAGER
+    // ============================================
+    class SoundManager {
+      static playBounce() {
+        if (!audioCtx) return;
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        // Procedural "Soft Chime" sound
+        osc.type = 'sine';
+
+        // Use a more harmonic frequency range
+        const notes = [440, 554.37, 659.25, 880, 1108.73]; // A Major Pentatonic
+        const baseFreq = random(notes);
+        osc.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
+
+        // Gentle decay for pleasantness
+        gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + random(0.2, 0.5));
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.6);
+      }
+    }
+
+    // ============================================
+    // COLOR GENERATION
+    // ============================================
+    function generateUniqueColor() {
+      // Select a random hue away from the previous one for high distinction
+      let lastHue = usedColors.length > 0 ? hue(usedColors[usedColors.length - 1]) : random(360);
+      let newHue = (lastHue + 40 + random(280)) % 360;
+
+      const saturation = random(85, 100);
+      const lightness = random(50, 70);
+      const col = color(`hsl(${Math.floor(newHue)}, ${saturation}%, ${lightness}%)`);
+      usedColors.push(col);
+      return col;
+    }
+
+    // ============================================
+    // BALL CLASS
+    // ============================================
+    class Ball {
+      constructor(x, y, isActive = true, ballNumber = 1) {
+        this.position = createVector(x, y);
+        this.velocity = createVector(0, 0);
+        this.radius = BALL_RADIUS;
+        this.isActive = isActive;
+        this.color = generateUniqueColor();
+        this.ballNumber = ballNumber; // 1st ball, 2nd ball, etc.
+        this.bounceCount = 0;
+        this.requiredBounces = ballNumber; // nth ball needs n bounces
+        this.freezeTimer = null; // timer starts after required bounces
+        this.freezeTimerStarted = false;
+        this.trail = [];
+        this.maxTrailLength = 20;
+      }
+
+      applyGravity(deltaTime) {
+        if (!this.isActive) return;
+        this.velocity.y += GRAVITY * deltaTime;
+      }
+
+      update(deltaTime) {
+        if (!this.isActive) return;
+
+        // Semi-implicit Euler integration
+        this.applyGravity(deltaTime);
+        this.position.add(p5.Vector.mult(this.velocity, deltaTime));
+
+        // Update trail
+        this.trail.push(this.position.copy());
+        if (this.trail.length > this.maxTrailLength) {
+          this.trail.shift();
+        }
+
+        // Update freeze timer if started
+        if (this.freezeTimerStarted && this.freezeTimer !== null) {
+          this.freezeTimer += deltaTime;
+        }
+      }
+
+      getSpeed() {
+        return this.velocity.mag();
+      }
+
+      getKineticEnergy() {
+        return 0.5 * this.velocity.magSq();
+      }
+
+      registerBounce() {
+        if (!this.isActive) return;
+        this.bounceCount++;
+
+        // Play dynamic sound
+        SoundManager.playBounce();
+
+        // Check if we've reached required bounces
+        if (this.bounceCount >= this.requiredBounces && !this.freezeTimerStarted) {
+          this.freezeTimerStarted = true;
+          this.freezeTimer = 0;
+        }
+      }
+
+      shouldFreeze() {
+        // Ball #1 (requiredBounces = 1) freezes after 1 second
+        // Ball #2+ freeze 1 second after reaching required bounces
+        if (this.ballNumber === 1) {
+          // First ball starts timer immediately
+          if (!this.freezeTimerStarted) {
+            this.freezeTimerStarted = true;
+            this.freezeTimer = 0;
+          }
+        }
+
+        return this.freezeTimerStarted && this.freezeTimer >= FREEZE_DELAY;
+      }
+
+      freeze() {
+        this.isActive = false;
+        this.velocity.set(0, 0);
+      }
+
+      getTimerProgress() {
+        if (!this.freezeTimerStarted) return 0;
+        return Math.min(this.freezeTimer / FREEZE_DELAY, 1.0);
+      }
+
+      display() {
+        push();
+
+        // Draw ball body with mainAlpha
+        let c = color(this.color);
+        c.setAlpha(mainAlpha);
+        fill(c);
+        noStroke();
+        circle(this.position.x, this.position.y, this.radius * 2);
+
+        // Draw 3D glossy highlight (top-left) with mainAlpha
+        fill(255, 150 * (mainAlpha / 255));
+        const highlightRadius = this.radius * 0.35;
+        const highlightOffset = this.radius * 0.35;
+        circle(this.position.x - highlightOffset, this.position.y - highlightOffset, highlightRadius);
+
+        pop();
+      }
+    }
+
+    // ============================================
+    // RING CLASS
+    // ============================================
+    class Ring {
+      constructor(centerX, centerY, radius, thickness) {
+        this.center = createVector(centerX, centerY);
+        this.radius = radius;
+        this.thickness = thickness;
+        this.rotation = 0; // current rotation angle
+        this.gapAngle = GAP_ANGLE;
+        this.rotationSpeed = RING_ROTATION_SPEED;
+      }
+
+      update(deltaTime) {
+        this.rotation += this.rotationSpeed * deltaTime;
+        this.rotation %= TWO_PI;
+      }
+
+      isPointInGap(x, y) {
+        const dx = x - this.center.x;
+        const dy = y - this.center.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        if (distance > this.radius - this.thickness / 2 &&
+          distance < this.radius + this.thickness / 2) {
+          return false; // point is in the ring wall
+        }
+
+        if (distance > this.radius) {
+          // Point is outside ring radius
+          let angle = Math.atan2(dy, dx);
+          if (angle < 0) angle += TWO_PI;
+
+          // Gap is centered at rotation angle
+          const gapStart = this.rotation - this.gapAngle / 2;
+          const gapEnd = this.rotation + this.gapAngle / 2;
+
+          // Normalize angle to be relative to gap
+          let relativeAngle = angle - this.rotation;
+          while (relativeAngle < -Math.PI) relativeAngle += TWO_PI;
+          while (relativeAngle > Math.PI) relativeAngle -= TWO_PI;
+
+          if (Math.abs(relativeAngle) < this.gapAngle / 2) {
+            return true; // point is in the gap
+          }
+        }
+
+        return false;
+      }
+
+      collideWithBall(ball) {
+        if (!ball.isActive) return;
+
+        const dx = ball.position.x - this.center.x;
+        const dy = ball.position.y - this.center.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        // Check if ball is in gap angle range
+        let angle = Math.atan2(dy, dx);
+        if (angle < 0) angle += TWO_PI;
+
+        let relativeAngle = angle - this.rotation;
+        while (relativeAngle < -Math.PI) relativeAngle += TWO_PI;
+        while (relativeAngle > Math.PI) relativeAngle -= TWO_PI;
+
+        const isInGapAngle = Math.abs(relativeAngle) < this.gapAngle / 2;
+
+        // Inner wall collision
+        const innerRadius = this.radius - this.thickness / 2;
+        const collisionDistance = innerRadius - ball.radius;
+
+        if (distance >= collisionDistance) {
+          // Ball is at or beyond the inner wall boundary
+
+          if (isInGapAngle) {
+            // Ball is in gap region
+            if (distance > innerRadius + ball.radius) {
+              // Ball has fully escaped through the gap
+              return 'ESCAPED';
+            }
+            // Ball is in gap but hasn't escaped yet - no collision
+          } else {
+            // Ball is hitting the solid ring wall - reflect
+            const normal = createVector(-dx / distance, -dy / distance);
+
+            // Reflect velocity: v' = v - 2(v·n)n
+            const dotProduct = ball.velocity.dot(normal);
+            if (dotProduct < 0) { // Only reflect if moving toward wall
+              const reflection = p5.Vector.mult(normal, (1 + RESTITUTION) * dotProduct);
+              ball.velocity.sub(reflection);
+
+              // Position correction to prevent tunneling
+              const overlap = distance - collisionDistance;
+              const correction = p5.Vector.mult(normal, overlap); // Push inward
+              ball.position.add(correction);
+
+              // Register bounce
+              ball.registerBounce();
+            }
+          }
+        }
+
+        return null;
+      }
+
+      display() {
+        push();
+        translate(this.center.x, this.center.y);
+
+        const gapStart = this.rotation - this.gapAngle / 2;
+        const gapEnd = this.rotation + this.gapAngle / 2;
+
+        // Simple thin white ring with mainAlpha
+        noFill();
+        stroke(255, mainAlpha);
+        strokeWeight(this.thickness);
+        strokeCap(SQUARE);
+        arc(0, 0, this.radius * 2, this.radius * 2, gapEnd, gapStart + TWO_PI);
+
+        pop();
+      }
+    }
+
+    // ============================================
+    // COLLISION UTILITIES
+    // ============================================
+    function checkBallToBallCollision(ball1, ball2) {
+      const dx = ball2.position.x - ball1.position.x;
+      const dy = ball2.position.y - ball1.position.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      const minDistance = ball1.radius + ball2.radius;
+
+      if (distance < minDistance && distance > 0) {
+        // Collision detected
+        const normal = createVector(dx / distance, dy / distance);
+
+        if (ball1.isActive && !ball2.isActive) {
+          // ball1 is moving, ball2 is frozen
+          // Perfectly elastic collision with static object
+
+          // Use dot product to check if ball1 is moving TOWARD ball2
+          const dotProduct = ball1.velocity.dot(normal);
+
+          if (dotProduct > 0) {
+            // Reflect velocity: v' = v - (1+e)(v·n)n
+            const reflection = p5.Vector.mult(normal, (1 + RESTITUTION) * dotProduct);
+            ball1.velocity.sub(reflection);
+
+            // Position correction: push ball1 back along -normal
+            const overlap = minDistance - distance;
+            const correction = p5.Vector.mult(normal, -overlap);
+            ball1.position.add(correction); // Add negative normal to push back
+
+            // Register bounce
+            ball1.registerBounce();
+          }
+        }
+      }
+    }
+
+    // ============================================
+    // BALL SPAWNING
+    // ============================================
+    function spawnNewBall(ballNumber = 1) {
+      // Spawn ball at random position inside ring
+      let x, y;
+      let attempts = 0;
+      const maxAttempts = 100;
+
+      do {
+        const angle = random(TWO_PI);
+        const distance = random(0, ring.radius - ring.thickness - BALL_RADIUS * 2);
+        x = ring.center.x + distance * cos(angle);
+        y = ring.center.y + distance * sin(angle);
+        attempts++;
+
+        // Check if position collides with any frozen ball
+        let collides = false;
+        for (let fb of frozenBalls) {
+          const d = dist(x, y, fb.position.x, fb.position.y);
+          if (d < BALL_RADIUS * 2 + 5) {
+            collides = true;
+            break;
+          }
+        }
+
+        if (!collides) break;
+      } while (attempts < maxAttempts);
+
+      return new Ball(x, y, true, ballNumber);
+    }
+
+    // ============================================
+    // PHYSICS STEP
+    // ============================================
+    function physicsStep(deltaTime) {
+      if (simulationEnded) return;
+
+      // Update ring rotation
+      ring.update(deltaTime);
+
+      // Update active ball
+      if (activeBall) {
+        activeBall.update(deltaTime);
+
+        // Check ring collision
+        const result = ring.collideWithBall(activeBall);
+        if (result === 'ESCAPED') {
+          handleEscape();
+          return;
+        }
+
+        // Check collisions with frozen balls
+        for (let fb of frozenBalls) {
+          checkBallToBallCollision(activeBall, fb);
+        }
+
+        // Check if ball should freeze (nth ball after nth bounce + 1s)
+        if (activeBall.shouldFreeze()) {
+          handleBallFreeze();
+        }
+      }
+    }
+
+    function handleBallFreeze() {
+      freezeCount++;
+      activeBall.freeze();
+      frozenBalls.push(activeBall);
+
+      // Update UI for frozen count (Hidden)
+      // document.getElementById('frozenCount').textContent = freezeCount;
+
+      // Spawn next ball with incremented index
+      activeBall = spawnNewBall(freezeCount + 1);
+    }
+
+    function handleEscape() {
+      simulationEnded = true;
+      noLoop();
+    }
+
+    function startSimulation() {
+      const overlay = document.getElementById('start-overlay');
+      overlay.style.opacity = '0';
+      setTimeout(() => {
+        overlay.style.display = 'none';
+        simulationStarted = true;
+        // Initialize Web Audio API
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        loop();
+      }, 400);
+    }
+
+    // ============================================
+    // P5.JS SETUP AND DRAW
+    // ============================================
+    function updateSimulationDimensions() {
+      // Calculate responsive radius
+      const minDim = min(windowWidth, windowHeight);
+      RING_RADIUS = minDim * 0.38;
+      RING_THICKNESS = max(4, RING_RADIUS * 0.03);
+      BALL_RADIUS = max(6, RING_RADIUS * 0.05);
+    }
+
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      updateSimulationDimensions();
+      frameRate(60);
+
+      // Initialize ring at center
+      ring = new Ring(width / 2, height / 2, RING_RADIUS, RING_THICKNESS);
+
+      // Spawn first ball
+      activeBall = spawnNewBall();
+
+      // Pause loop until clicked
+      noLoop();
+    }
+
+    function draw() {
+      if (!simulationStarted) return;
+
+      // Handle Fade-In
+      if (mainAlpha < 255) {
+        mainAlpha += 5; // Gradually increase alpha
+      }
+
+      background(5, 5, 8);
+
+      // Wrap everything in a push/pop for global alpha
+      push();
+      if (mainAlpha < 255) {
+        // Simple way to apply global alpha in p5 for the current frame
+        // (This only works for elements drawn after this, will need tint for textures or manual alpha for shapes)
+      }
+
+      // Subtle grid/star background for professional depth
+      stroke(255, 10 * (mainAlpha / 255));
+      strokeWeight(1);
+      for (let i = 0; i < width; i += 100) line(i, 0, i, height);
+      for (let j = 0; j < height; j += 100) line(0, j, width, j);
+
+      if (!simulationEnded) {
+        // For perfect 60 FPS recording, we use a fixed frame time
+        // instead of the variable deltaTime.
+        const frameTime = 1 / 60;
+        accumulator += frameTime;
+
+        // Cap accumulator to prevent spiral of death
+        if (accumulator > 0.2) accumulator = 0.2;
+
+        while (accumulator >= FIXED_TIMESTEP) {
+          physicsStep(FIXED_TIMESTEP);
+          accumulator -= FIXED_TIMESTEP;
+        }
+      }
+
+      // Render
+      ring.display();
+
+      for (let fb of frozenBalls) {
+        fb.display();
+      }
+
+      if (activeBall) {
+        activeBall.display();
+      }
+    }
+
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
+      updateSimulationDimensions();
+      ring.center.set(width / 2, height / 2);
+      ring.radius = RING_RADIUS;
+      ring.thickness = RING_THICKNESS;
+
+      // Update balls if necessary (optional - might be jarring to resize mid-sim)
+      if (activeBall) activeBall.radius = BALL_RADIUS;
+      for (let fb of frozenBalls) fb.radius = BALL_RADIUS;
+    }
+  </script>
+</body>
+
+</html>
